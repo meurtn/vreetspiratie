@@ -9,7 +9,8 @@ const STANDAARD_GROEPEN = [
   { id: 'soort', naam: 'Soort gerecht', tags: ['Soep', 'Ovenschotel', 'Stoofpot', 'Salade', 'Wok', 'Pizza', 'Burger'] },
   { id: 'gelegenheid', naam: 'Gelegenheid', tags: ['Snel', 'Doordeweeks', 'Weekend', 'Gasten', 'Comfortfood', 'Zomers', 'Winters'] }
 ];
-const APP_VERSIE = '1.1';
+const APP_VERSIE = '1.2';
+const HH_ID = 'thuis'; // er is precies een gedeelde lijst; toegang loopt via de Firestore-regels
 
 /* ================= Lokale opslag (alleen voorkeuren van dit apparaat) ================= */
 const L = {
@@ -19,8 +20,8 @@ const L = {
 };
 
 const S = {
-  code: L.get('code', null),
-  ik: L.get('ik', 0),
+  ik: L.get('ik', null),
+  gebruiker: null,
   namen: ['Persoon 1', 'Persoon 2'],
   groepen: null,
   filterOpen: L.get('filterOpen', false),
@@ -98,17 +99,9 @@ function melding(tekst) {
 function schrijf(p) {
   Promise.resolve(p).catch(e => {
     console.error(e);
-    melding(e?.code === 'permission-denied' ? 'Geen toegang tot deze lijst. Controleer de Firestore-regels.' : 'Opslaan mislukt: ' + (e?.message || e));
+    melding(e?.code === 'permission-denied' ? 'Geen toegang. Dit Google-account staat niet in de Firestore-regels.' : 'Opslaan mislukt: ' + (e?.message || e));
   });
 }
-
-function nieuweCode() {
-  const abc = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-  const r = crypto.getRandomValues(new Uint32Array(12));
-  return Array.from(r, x => abc[x % abc.length]).join('');
-}
-const toonCode = c => (c || '').match(/.{1,4}/g)?.join('-') || '';
-const schoonCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 /* ================= Foto's verkleinen ================= */
 async function laadBeeld(file) {
@@ -145,20 +138,39 @@ async function fbInit() {
   ]);
   const fbApp = fa.initializeApp(firebaseConfig);
   const auth = au.getAuth(fbApp);
-  await new Promise((res, rej) => {
-    const stop = au.onAuthStateChanged(auth, u => {
-      if (u) { stop(); res(u); }
-      else au.signInAnonymously(auth).catch(e => { stop(); rej(e); });
-    });
-  });
   let db;
   try {
     db = fs.initializeFirestore(fbApp, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) });
   } catch {
     db = fs.getFirestore(fbApp);
   }
-  _fb = { fs, db };
+  _fb = { fs, db, au, auth };
   return _fb;
+}
+
+// Wacht tot bekend is of er al iemand is ingelogd op dit apparaat (werkt ook offline).
+function wachtOpGebruiker({ au, auth }) {
+  return new Promise(res => { const stop = au.onAuthStateChanged(auth, u => { stop(); res(u); }); });
+}
+
+// Moet direct vanuit een tik worden aangeroepen, anders blokkeert de browser het inlogvenster.
+function logIn() {
+  const { au, auth } = _fb;
+  const prov = new au.GoogleAuthProvider();
+  prov.setCustomParameters({ prompt: 'select_account' });
+  return au.signInWithPopup(auth, prov).then(r => r.user).catch(e => {
+    const c = e?.code || '';
+    if (c === 'auth/popup-blocked' || c === 'auth/operation-not-supported-in-this-environment') {
+      return au.signInWithRedirect(auth, prov).then(() => null);
+    }
+    throw e;
+  });
+}
+
+async function logUit() {
+  try { const { au, auth } = await fbInit(); await au.signOut(auth); } catch (e) { console.error(e); }
+  L.del('ik');
+  location.reload();
 }
 
 function firebaseStore({ fs, db }, code) {
@@ -172,7 +184,7 @@ function firebaseStore({ fs, db }, code) {
     luisterHuishouden(cb) { return fs.onSnapshot(hh, s => cb(s.exists() ? s.data() : null), e => console.error(e)); },
     luisterGerechten(cb) {
       return fs.onSnapshot(col, s => cb(s.docs.map(d => ({ id: d.id, ...d.data() }))),
-        e => { console.error(e); melding('Lijst laden mislukt: ' + e.message); });
+        e => { console.error(e); e?.code === 'permission-denied' ? toonGeenToegang() : melding('Lijst laden mislukt: ' + e.message); });
     },
     nieuwId() { return fs.doc(col).id; },
     bewaar(id, patch) { return fs.setDoc(fs.doc(col, id), patch, { merge: true }); },
@@ -213,7 +225,7 @@ function demoStore(code) {
   };
 }
 
-async function maakStore(code) { return DEMO ? demoStore(code) : firebaseStore(await fbInit(), code); }
+async function maakStore() { return DEMO ? demoStore(HH_ID) : firebaseStore(await fbInit(), HH_ID); }
 
 /* ================= Vellen (pop-ups) ================= */
 function openVel(html) {
@@ -234,19 +246,46 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') sluitVel(); 
 const sluitKnop = `<button class="icoonknop" data-sluit aria-label="Sluiten"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>`;
 function koppelSluit(v) { v.querySelectorAll('[data-sluit]').forEach(b => b.addEventListener('click', sluitVel)); }
 
-/* ================= Welkom en koppelen ================= */
-function toonWelkom() {
-  app.innerHTML = `
+/* ================= Welkom en inloggen ================= */
+const DEMO_TEKST = 'Demomodus: Firebase is nog niet ingesteld, de lijst blijft op dit apparaat.';
+function welkomHtml(inhoud) {
+  return `
     <div class="welkom">
       <img src="icons/icon-192.png" alt="">
       <h1>Vreetspiratie</h1>
       <p>Alle gerechten die jullie ooit maakten, in één overzicht. Voor als de vraag komt: waar heb je zin in?</p>
-      ${DEMO ? '<div class="demo" style="margin:0 0 18px">Demomodus: Firebase is nog niet ingesteld, de lijst blijft op dit apparaat.</div>' : ''}
-      <button class="knop hoofd" id="wNieuw">Nieuwe lijst starten</button>
-      <button class="knop licht" id="wKoppel">Ik heb een koppelcode</button>
+      ${inhoud}
     </div>`;
+}
+const kader = tekst => `<div class="demo" style="margin:0 0 18px">${tekst}</div>`;
+
+function toonLogin() {
+  app.innerHTML = welkomHtml('<button class="knop hoofd" id="wLogin">Inloggen met Google</button>');
+  $('#wLogin').onclick = e => {
+    e.target.disabled = true;
+    logIn().then(u => { if (u) start(); }).catch(err => {
+      console.error(err);
+      e.target.disabled = false;
+      if (!/popup-closed|cancelled-popup/.test(err?.code || '')) melding(foutTekst(err));
+    });
+  };
+}
+
+function toonGeenToegang() {
+  sluitVel();
+  app.innerHTML = welkomHtml(kader(`${esc(S.gebruiker?.email || 'Dit account')} heeft geen toegang tot deze lijst.`) +
+    '<button class="knop licht" id="wUit">Ander account kiezen</button>');
+  $('#wUit').onclick = logUit;
+}
+
+function toonFout(err) {
+  app.innerHTML = welkomHtml(kader(esc(foutTekst(err))) + '<button class="knop licht" id="wOpnieuw">Opnieuw proberen</button>');
+  $('#wOpnieuw').onclick = () => location.reload();
+}
+
+function toonNieuw() {
+  app.innerHTML = welkomHtml((DEMO ? kader(DEMO_TEKST) : '') + '<button class="knop hoofd" id="wNieuw">Lijst starten</button>');
   $('#wNieuw').onclick = welkomNieuw;
-  $('#wKoppel').onclick = welkomKoppel;
 }
 
 function welkomNieuw() {
@@ -261,12 +300,8 @@ function welkomNieuw() {
     if (!n0 || !n1) return melding('Vul beide namen in');
     e.target.disabled = true; e.target.textContent = 'Bezig...';
     try {
-      const code = nieuweCode();
-      const store = await maakStore(code);
-      await store.maakHuishouden({ namen: [n0, n1], tagGroepen: STANDAARD_GROEPEN, aangemaakt: Date.now() });
-      L.set('code', code); L.set('ik', 0);
-      S.code = code; S.ik = 0; S.store = store;
-      toonCodeVel(true);
+      await S.store.maakHuishouden({ namen: [n0, n1], tagGroepen: STANDAARD_GROEPEN, aangemaakt: Date.now() });
+      kiesIk(0);
     } catch (err) {
       console.error(err);
       e.target.disabled = false; e.target.textContent = 'Lijst starten';
@@ -275,62 +310,25 @@ function welkomNieuw() {
   };
 }
 
-function toonCodeVel(eerste) {
-  const v = openVel(`
-    <div class="vel-kop"><h2>${eerste ? 'Je lijst staat klaar' : 'Koppelcode'}</h2>${eerste ? '' : sluitKnop}</div>
-    <p class="uitleg">Met deze code opent ${esc(wieNaam(ander(S.ik)))} dezelfde lijst op een eigen telefoon: app openen, kies "Ik heb een koppelcode".</p>
-    <div class="code">${toonCode(S.code)}</div>
-    <div class="knoppen"><button class="knop licht" id="deel">Code delen</button>${eerste ? '<button class="knop hoofd" id="verder">Naar de lijst</button>' : ''}</div>`);
-  koppelSluit(v);
-  $('#deel', v).onclick = deelCode;
-  if (eerste) $('#verder', v).onclick = () => { sluitVel(); start(); };
+// De lijst bestaat al: alleen nog vastleggen wie er op dit apparaat zit.
+function toonWieBenJij(namen) {
+  app.innerHTML = welkomHtml(`<span class="veldlabel">Wie ben jij?</span>
+    ${namen.map((n, i) => `<button class="knop licht" data-p="${i}">${esc(n)}</button>`).join('')}`);
+  app.querySelectorAll('[data-p]').forEach(b => b.onclick = () => kiesIk(Number(b.dataset.p)));
 }
 
-async function deelCode() {
-  const tekst = `Koppelcode voor onze Vreetspiratie-lijst: ${toonCode(S.code)}\n${location.origin + location.pathname}`;
-  try {
-    if (navigator.share) await navigator.share({ text: tekst });
-    else { await navigator.clipboard.writeText(tekst); melding('Code gekopieerd'); }
-  } catch { /* delen geannuleerd */ }
-}
-
-function welkomKoppel() {
-  const v = openVel(`
-    <div class="vel-kop"><h2>Koppelen</h2>${sluitKnop}</div>
-    <div class="veld"><label for="kc">Koppelcode</label><input class="invoer" id="kc" placeholder="XXXX-XXXX-XXXX" autocapitalize="characters" autocomplete="off"></div>
-    ${DEMO ? '<p class="uitleg">In demomodus werkt koppelen alleen op hetzelfde apparaat.</p>' : ''}
-    <div class="knoppen"><button class="knop hoofd" id="kok">Koppelen</button></div>
-    <div id="wie"></div>`);
-  koppelSluit(v);
-  $('#kok', v).onclick = async e => {
-    const code = schoonCode($('#kc', v).value);
-    if (code.length !== 12) return melding('Een koppelcode heeft 12 tekens');
-    e.target.disabled = true;
-    try {
-      const store = await maakStore(code);
-      const hh = await store.haalHuishouden();
-      if (!hh) { e.target.disabled = false; return melding('Deze code bestaat niet. Controleer de code.'); }
-      const namen = hh.namen || ['Persoon 1', 'Persoon 2'];
-      $('#wie', v).innerHTML = `<div class="veld" style="margin-top:18px"><span class="veldlabel">Wie ben jij?</span>
-        <div class="knoppen" style="margin-top:0">${namen.map((n, i) => `<button class="knop licht" data-p="${i}">${esc(n)}</button>`).join('')}</div></div>`;
-      v.querySelectorAll('[data-p]').forEach(b => b.onclick = () => {
-        S.code = code; S.ik = Number(b.dataset.p); S.store = store;
-        L.set('code', code); L.set('ik', S.ik);
-        sluitVel(); start();
-      });
-    } catch (err) {
-      console.error(err);
-      e.target.disabled = false;
-      melding(foutTekst(err));
-    }
-  };
+function kiesIk(p) {
+  S.ik = p; L.set('ik', p);
+  sluitVel();
+  start();
 }
 
 function foutTekst(err) {
   const c = err?.code || '';
-  if (c.includes('operation-not-allowed') || c.includes('admin-restricted')) return 'Anonieme login staat uit in Firebase. Zet die aan bij Authentication.';
-  if (c.includes('network') || c === 'unavailable') return 'Geen verbinding. Voor de eerste keer koppelen is internet nodig.';
-  if (c.includes('permission-denied')) return 'Geen toegang. Controleer de Firestore-regels.';
+  if (c.includes('operation-not-allowed')) return 'Inloggen met Google staat uit in Firebase. Zet het aan bij Authentication.';
+  if (c.includes('unauthorized-domain')) return 'Dit webadres staat nog niet bij de geautoriseerde domeinen in Firebase Authentication.';
+  if (c.includes('network') || c === 'unavailable') return 'Geen verbinding. Voor de eerste keer inloggen is internet nodig.';
+  if (c.includes('permission-denied')) return 'Geen toegang. Dit Google-account staat niet in de Firestore-regels.';
   return 'Er ging iets mis: ' + (err?.message || err);
 }
 
@@ -848,12 +846,6 @@ function toonInstellingen() {
       </div>
     </div>
 
-    <div class="blok"><h3>Koppelcode</h3>
-      <p class="uitleg">Met deze code opent iemand dezelfde lijst op een andere telefoon.</p>
-      <div class="code">${toonCode(S.code)}</div>
-      <button class="knop licht" id="deel2" style="width:100%">Code delen</button>
-    </div>
-
     <div class="blok"><h3>Tags</h3>
       <p class="uitleg">${alleTags().length} tags in ${groepen().length} categorieën.</p>
       <button class="knop licht" id="tagbeheer" style="width:100%">Tags beheren</button>
@@ -868,9 +860,9 @@ function toonInstellingen() {
       <input type="file" id="impf" accept="application/json,.json" class="verborgen">
     </div>
 
-    <div class="blok"><h3>Deze telefoon</h3>
-      <p class="uitleg">Loskoppelen haalt de lijst van deze telefoon. De lijst zelf blijft bestaan en met de koppelcode kom je terug.</p>
-      <button class="knop gevaar" id="los" style="padding:0">Loskoppelen</button>
+    <div class="blok"><h3>Account</h3>
+      <p class="uitleg">${DEMO ? 'Demomodus: de lijst staat alleen op dit apparaat.' : `Ingelogd als ${esc(S.gebruiker?.email || '')}. Alleen de Google-accounts in de Firestore-regels hebben toegang.`}</p>
+      ${DEMO ? '' : '<button class="knop licht" id="uit" style="width:100%">Uitloggen</button>'}
       <p class="uitleg" style="margin:12px 0 0">Versie ${APP_VERSIE}${DEMO ? ', demomodus' : ''}</p>
     </div>`);
   koppelSluit(v);
@@ -888,7 +880,6 @@ function toonInstellingen() {
     v.querySelectorAll('[data-ik]').forEach(x => x.setAttribute('aria-pressed', String(Number(x.dataset.ik) === S.ik)));
     updateLijst();
   };
-  $('#deel2', v).onclick = deelCode;
 
   $('#tagbeheer', v).onclick = toonTagBeheer;
 
@@ -896,11 +887,8 @@ function toonInstellingen() {
   $('#imp', v).onclick = () => $('#impf', v).click();
   $('#impf', v).onchange = e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) importeer(f); };
 
-  $('#los', v).onclick = () => {
-    if (!confirm(`Loskoppelen? Bewaar eerst je koppelcode: ${toonCode(S.code)}`)) return;
-    L.del('code'); L.del('ik');
-    location.reload();
-  };
+  const uit = $('#uit', v);
+  if (uit) uit.onclick = () => { if (confirm('Uitloggen op dit apparaat?')) logUit(); };
 }
 
 /* ================= Tags beheren ================= */
@@ -1069,15 +1057,22 @@ async function importeer(file) {
 
 /* ================= Start ================= */
 async function start() {
-  if (!S.code) return toonWelkom();
-  bouwHoofd();
   try {
-    if (!S.store) S.store = await maakStore(S.code);
+    if (!DEMO) {
+      const fb = await fbInit();
+      S.gebruiker = await wachtOpGebruiker(fb);
+      if (!S.gebruiker) return toonLogin();
+    }
+    if (!S.store) S.store = await maakStore();
+    if (S.ik == null) {
+      const hh = await S.store.haalHuishouden();
+      return hh ? toonWieBenJij(hh.namen || ['Persoon 1', 'Persoon 2']) : toonNieuw();
+    }
   } catch (e) {
     console.error(e);
-    $('#lijst').innerHTML = `<div class="leegte"><b>Lijst niet bereikbaar</b>${esc(foutTekst(e))}<br><br><button class="knop licht" onclick="location.reload()">Opnieuw proberen</button></div>`;
-    return;
+    return (e?.code || '').includes('permission-denied') ? toonGeenToegang() : toonFout(e);
   }
+  bouwHoofd();
   S.store.luisterHuishouden(hh => {
     if (!hh) return;
     if (Array.isArray(hh.namen)) S.namen = hh.namen;

@@ -1,0 +1,7 @@
+.DS_Store
+Thumbs.db
+.vscode/
+.firebase/
+node_modules/
+*.log
+vreetspiratie-*.json

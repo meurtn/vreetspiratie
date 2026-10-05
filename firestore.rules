@@ -2,19 +2,19 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Een huishouden is alleen bereikbaar als je de koppelcode (het document-id) kent.
-    // Lijsten opvragen van alle huishoudens kan niet, dus codes zijn niet te raden of op te sommen.
-    match /huishoudens/{code} {
-      allow get: if request.auth != null;
-      allow create, update: if request.auth != null && code.matches('^[A-Z0-9]{12}$');
-      allow list, delete: if false;
+    // Alleen deze Google-accounts mogen de lijst lezen en wijzigen.
+    // Vervang de twee adressen in Firebase Console door jullie eigen adressen, in kleine letters.
+    // Laat de echte adressen niet in de openbare repo staan.
+    function magErin() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in ['VUL_EMAIL_1', 'VUL_EMAIL_2'];
+    }
 
-      match /gerechten/{id} {
-        allow read, write: if request.auth != null && code.matches('^[A-Z0-9]{12}$');
-      }
-      match /fotos/{id} {
-        allow get, write: if request.auth != null && code.matches('^[A-Z0-9]{12}$');
-        allow list: if false;
+    match /huishoudens/thuis {
+      allow read, write: if magErin();
+      match /{document=**} {
+        allow read, write: if magErin();
       }
     }
   }

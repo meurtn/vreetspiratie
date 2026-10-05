@@ -13,7 +13,9 @@ Per gerecht: naam, tags, een cijfer per persoon en een foto. Geen recepten.
 
 ## Firebase
 
-Gebruikt Authentication (anoniem) en Firestore. De lijst wordt gedeeld via een koppelcode van 12 tekens.
+Gebruikt Authentication (inloggen met Google) en Firestore. Alleen de Google-accounts die in de Firestore-regels staan hebben toegang.
+In `firestore.rules` staan placeholders: de echte e-mailadressen vul je alleen in Firebase Console in, niet in deze repo.
+Het webadres van de app moet bij Authentication, Instellingen, Geautoriseerde domeinen staan.
 
 ## Publiceren
 
