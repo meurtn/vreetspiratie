@@ -9,7 +9,7 @@ const STANDAARD_GROEPEN = [
   { id: 'soort', naam: 'Soort gerecht', tags: ['Soep', 'Ovenschotel', 'Stoofpot', 'Salade', 'Wok', 'Pizza', 'Burger'] },
   { id: 'gelegenheid', naam: 'Gelegenheid', tags: ['Snel', 'Doordeweeks', 'Weekend', 'Gasten', 'Comfortfood', 'Zomers', 'Winters'] }
 ];
-const APP_VERSIE = '1.2';
+const APP_VERSIE = '1.3';
 const HH_ID = 'thuis'; // er is precies een gedeelde lijst; toegang loopt via de Firestore-regels
 
 /* ================= Lokale opslag (alleen voorkeuren van dit apparaat) ================= */
@@ -20,7 +20,7 @@ const L = {
 };
 
 const S = {
-  ik: L.get('ik', null),
+  ik: null, // 0 of 1: welke persoon bij de ingelogde gebruiker hoort
   gebruiker: null,
   namen: ['Persoon 1', 'Persoon 2'],
   groepen: null,
@@ -169,7 +169,6 @@ function logIn() {
 
 async function logUit() {
   try { const { au, auth } = await fbInit(); await au.signOut(auth); } catch (e) { console.error(e); }
-  L.del('ik');
   location.reload();
 }
 
@@ -247,7 +246,6 @@ const sluitKnop = `<button class="icoonknop" data-sluit aria-label="Sluiten"><sv
 function koppelSluit(v) { v.querySelectorAll('[data-sluit]').forEach(b => b.addEventListener('click', sluitVel)); }
 
 /* ================= Welkom en inloggen ================= */
-const DEMO_TEKST = 'Demomodus: Firebase is nog niet ingesteld, de lijst blijft op dit apparaat.';
 function welkomHtml(inhoud) {
   return `
     <div class="welkom">
@@ -283,44 +281,29 @@ function toonFout(err) {
   $('#wOpnieuw').onclick = () => location.reload();
 }
 
-function toonNieuw() {
-  app.innerHTML = welkomHtml((DEMO ? kader(DEMO_TEKST) : '') + '<button class="knop hoofd" id="wNieuw">Lijst starten</button>');
-  $('#wNieuw').onclick = welkomNieuw;
-}
-
-function welkomNieuw() {
-  const v = openVel(`
-    <div class="vel-kop"><h2>Nieuwe lijst</h2>${sluitKnop}</div>
-    <div class="veld"><label for="n0">Jouw naam</label><input class="invoer" id="n0" autocomplete="given-name"></div>
-    <div class="veld"><label for="n1">Naam van wie de lijst met je deelt</label><input class="invoer" id="n1"></div>
-    <div class="knoppen"><button class="knop hoofd" id="start">Lijst starten</button></div>`);
-  koppelSluit(v);
-  $('#start', v).onclick = async e => {
-    const n0 = $('#n0', v).value.trim(), n1 = $('#n1', v).value.trim();
-    if (!n0 || !n1) return melding('Vul beide namen in');
-    e.target.disabled = true; e.target.textContent = 'Bezig...';
-    try {
-      await S.store.maakHuishouden({ namen: [n0, n1], tagGroepen: STANDAARD_GROEPEN, aangemaakt: Date.now() });
-      kiesIk(0);
-    } catch (err) {
-      console.error(err);
-      e.target.disabled = false; e.target.textContent = 'Lijst starten';
-      melding(foutTekst(err));
-    }
-  };
-}
-
-// De lijst bestaat al: alleen nog vastleggen wie er op dit apparaat zit.
-function toonWieBenJij(namen) {
-  app.innerHTML = welkomHtml(`<span class="veldlabel">Wie ben jij?</span>
-    ${namen.map((n, i) => `<button class="knop licht" data-p="${i}">${esc(n)}</button>`).join('')}`);
-  app.querySelectorAll('[data-p]').forEach(b => b.onclick = () => kiesIk(Number(b.dataset.p)));
-}
-
-function kiesIk(p) {
-  S.ik = p; L.set('ik', p);
-  sluitVel();
-  start();
+// Koppelt de ingelogde gebruiker aan persoon 0 of 1 van de lijst. De eerste die inlogt maakt de lijst aan,
+// de tweede krijgt de vrije plek. De naam komt uit het Google-account en is later aan te passen.
+async function koppelPersoon() {
+  const u = S.gebruiker;
+  const voornaam = netjes(String(u.displayName || '').split(' ')[0]);
+  const hh = await S.store.haalHuishouden();
+  if (!hh) {
+    await S.store.maakHuishouden({ namen: [voornaam || 'Persoon 1', 'Persoon 2'], leden: [u.uid, null], tagGroepen: STANDAARD_GROEPEN, aangemaakt: Date.now() });
+    return 0;
+  }
+  const leden = [hh.leden?.[0] ?? null, hh.leden?.[1] ?? null];
+  let p = leden.indexOf(u.uid);
+  if (p < 0) {
+    const oud = L.get('ik', null); // keuze uit de versie waarin je zelf een persoon koos
+    p = (oud === 0 || oud === 1) && !leden[oud] ? oud : leden.indexOf(null);
+    if (p < 0) throw new Error('Deze lijst is al aan twee andere accounts gekoppeld.');
+    leden[p] = u.uid;
+    const namen = [hh.namen?.[0] || 'Persoon 1', hh.namen?.[1] || 'Persoon 2'];
+    if (voornaam && /^Persoon [12]$/.test(namen[p])) namen[p] = voornaam;
+    await S.store.zetHuishouden({ leden, namen });
+    L.del('ik');
+  }
+  return p;
 }
 
 function foutTekst(err) {
@@ -355,7 +338,7 @@ function bouwHoofd() {
         <div class="zoekrij">
           <input class="zoek" id="zoek" type="search" placeholder="Zoeken" autocomplete="off" value="${esc(S.zoek)}">
           <select class="sorteer" id="sort" aria-label="Sorteren">
-            <option value="score">Cijfer</option>
+            <option value="score">Score</option>
             <option value="nieuw">Nieuwste</option>
             <option value="az">A tot Z</option>
           </select>
@@ -841,9 +824,6 @@ function toonInstellingen() {
       <div class="veld"><input class="invoer" id="in0" value="${esc(S.namen[0])}" aria-label="Naam 1"></div>
       <div class="veld"><input class="invoer" id="in1" value="${esc(S.namen[1])}" aria-label="Naam 2"></div>
       <button class="knop licht" id="namenOk" style="width:100%">Namen opslaan</button>
-      <div class="veld" style="margin:16px 0 0"><span class="veldlabel">Op deze telefoon ben jij</span>
-        <div class="segment" id="ikseg">${[0, 1].map(p => `<button type="button" data-ik="${p}" aria-pressed="${S.ik === p}">${esc(wieNaam(p))}</button>`).join('')}</div>
-      </div>
     </div>
 
     <div class="blok"><h3>Tags</h3>
@@ -872,13 +852,6 @@ function toonInstellingen() {
     if (!n[0] || !n[1]) return melding('Vul beide namen in');
     schrijf(S.store.zetHuishouden({ namen: n }));
     melding('Namen opgeslagen');
-  };
-  $('#ikseg', v).onclick = e => {
-    const b = e.target.closest('[data-ik]');
-    if (!b) return;
-    S.ik = Number(b.dataset.ik); L.set('ik', S.ik);
-    v.querySelectorAll('[data-ik]').forEach(x => x.setAttribute('aria-pressed', String(Number(x.dataset.ik) === S.ik)));
-    updateLijst();
   };
 
   $('#tagbeheer', v).onclick = toonTagBeheer;
@@ -1058,16 +1031,17 @@ async function importeer(file) {
 /* ================= Start ================= */
 async function start() {
   try {
-    if (!DEMO) {
+    if (DEMO) S.gebruiker = { uid: 'demo', displayName: '', email: '' };
+    else {
       const fb = await fbInit();
       S.gebruiker = await wachtOpGebruiker(fb);
       if (!S.gebruiker) return toonLogin();
     }
     if (!S.store) S.store = await maakStore();
-    if (S.ik == null) {
-      const hh = await S.store.haalHuishouden();
-      return hh ? toonWieBenJij(hh.namen || ['Persoon 1', 'Persoon 2']) : toonNieuw();
-    }
+    // De koppeling per account onthouden, zodat de app ook zonder verbinding start.
+    const sleutel = 'ik.' + S.gebruiker.uid;
+    S.ik = L.get(sleutel, null);
+    if (S.ik !== 0 && S.ik !== 1) { S.ik = await koppelPersoon(); L.set(sleutel, S.ik); }
   } catch (e) {
     console.error(e);
     return (e?.code || '').includes('permission-denied') ? toonGeenToegang() : toonFout(e);
