@@ -1,7 +1,7 @@
 // Service worker: app werkt offline. Verhoog VERSIE na elke wijziging aan de app.
-const VERSIE = 'vreet-v9';
+const VERSIE = 'vreet-v10';
 const SCHIL = ['./', './index.html', './app.js', './firebase-config.js', './manifest.webmanifest',
-  './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
+  './icons/kom-192.png', './icons/kom-512.png', './icons/kom-apple.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSIE).then(c => c.addAll(SCHIL)).then(() => self.skipWaiting()));

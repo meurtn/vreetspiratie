@@ -3,6 +3,7 @@
   "short_name": "Vreetspiratie",
   "description": "Alle gerechten die jullie ooit maakten, in een overzicht.",
   "lang": "nl",
+  "id": "/vreetspiratie/",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
@@ -10,8 +11,8 @@
   "background_color": "#EEF0EA",
   "theme_color": "#4A2545",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    { "src": "icons/kom-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/kom-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/kom-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

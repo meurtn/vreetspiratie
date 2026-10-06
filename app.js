@@ -249,7 +249,7 @@ function koppelSluit(v) { v.querySelectorAll('[data-sluit]').forEach(b => b.addE
 function welkomHtml(inhoud) {
   return `
     <div class="welkom">
-      <img src="icons/icon-192.png" alt="">
+      <img src="icons/kom-192.png" alt="">
       <h1>Vreetspiratie</h1>
       <p>Alle gerechten die jullie ooit maakten, in één overzicht. Voor als de vraag komt: waar heb je zin in?</p>
       ${inhoud}
