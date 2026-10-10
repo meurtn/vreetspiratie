@@ -9,7 +9,7 @@ const STANDAARD_GROEPEN = [
   { id: 'soort', naam: 'Soort gerecht', tags: ['Soep', 'Ovenschotel', 'Stoofpot', 'Salade', 'Wok', 'Pizza', 'Burger'] },
   { id: 'gelegenheid', naam: 'Gelegenheid', tags: ['Snel', 'Doordeweeks', 'Weekend', 'Gasten', 'Comfortfood', 'Zomers', 'Winters'] }
 ];
-const APP_VERSIE = '1.3';
+const APP_VERSIE = '1.4';
 const HH_ID = 'thuis'; // er is precies een gedeelde lijst; toegang loopt via de Firestore-regels
 
 /* ================= Lokale opslag (alleen voorkeuren van dit apparaat) ================= */
@@ -103,29 +103,143 @@ function schrijf(p) {
   });
 }
 
-/* ================= Foto's verkleinen ================= */
-async function laadBeeld(file) {
-  try { return await createImageBitmap(file); } catch { /* val terug op img */ }
-  return new Promise((res, rej) => {
-    const img = new Image();
-    img.onload = () => res(img);
-    img.onerror = () => rej(new Error('Deze foto kan niet worden geopend.'));
-    img.src = URL.createObjectURL(file);
-  });
-}
-function naarJpeg(beeld, max, kwaliteit) {
-  const w = beeld.width, h = beeld.height, s = Math.min(1, max / Math.max(w, h));
+/* ================= Foto's: laden, bijsnijden en klein opslaan ================= */
+const FOTO_GROOT = 1000, FOTO_THUMB = 300, BRON_MAX = 2048;
+
+// Laadt een bestand of data-URL en verkleint meteen tot maximaal BRON_MAX, zodat bijsnijden soepel blijft.
+async function laadBron(bron) {
+  let b;
+  if (bron instanceof Blob) {
+    try { b = await createImageBitmap(bron); } catch { b = null; }
+  }
+  if (!b) {
+    b = await new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => res(img);
+      img.onerror = () => rej(new Error('Deze foto kan niet worden geopend.'));
+      img.src = bron instanceof Blob ? URL.createObjectURL(bron) : bron;
+    });
+  }
+  const w = b.width, h = b.height, k = Math.min(1, BRON_MAX / Math.max(w, h));
   const c = document.createElement('canvas');
-  c.width = Math.round(w * s); c.height = Math.round(h * s);
-  c.getContext('2d').drawImage(beeld, 0, 0, c.width, c.height);
-  return c.toDataURL('image/jpeg', kwaliteit);
+  c.width = Math.round(w * k); c.height = Math.round(h * k);
+  c.getContext('2d').drawImage(b, 0, 0, c.width, c.height);
+  if (b.close) b.close();
+  return c;
 }
-async function verwerkFoto(file) {
-  const b = await laadBeeld(file);
-  const thumb = naarJpeg(b, 360, 0.72);
-  let q = 0.8, groot = naarJpeg(b, 1200, q);
-  while (groot.length > 850000 && q > 0.4) { q -= 0.1; groot = naarJpeg(b, 1200, q); }
+
+// WebP is het kleinst; browsers die dat niet kunnen maken leveren JPEG.
+function naarData(c, q) {
+  const w = c.toDataURL('image/webp', q);
+  return w.startsWith('data:image/webp') ? w : c.toDataURL('image/jpeg', q);
+}
+function snijUit(bron, uit, maat) {
+  const n = Math.max(1, Math.min(maat, Math.round(uit.z)));
+  const c = document.createElement('canvas');
+  c.width = c.height = n;
+  const x = c.getContext('2d');
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(bron, uit.x, uit.y, uit.z, uit.z, 0, 0, n, n);
+  return c;
+}
+function maakFotos(bron, uit) {
+  const thumb = naarData(snijUit(bron, uit, FOTO_THUMB), 0.7);
+  const gc = snijUit(bron, uit, FOTO_GROOT);
+  let q = 0.78, groot = naarData(gc, q);
+  while (groot.length > 400000 && q > 0.45) { q -= 0.08; groot = naarData(gc, q); }
   return { thumb, groot };
+}
+
+// Vierkant uitsnijden: slepen, knijpen, scrollen of de schuif. Geeft { x, y, z } in bronpixels terug, of null.
+function snijFoto(bron, vorige) {
+  return new Promise(klaar => {
+    const a = document.createElement('div');
+    a.className = 'snij-achter';
+    a.innerHTML = `<div class="snij" role="dialog" aria-modal="true" aria-label="Foto bijsnijden">
+      <h2>Foto bijsnijden</h2>
+      <div class="snijvak"><canvas></canvas><div class="snijraster"></div></div>
+      <input type="range" class="schuif" min="1" max="5" step="0.01" value="1" aria-label="Zoomen">
+      <p class="uitleg">Sleep om te verschuiven. Knijp of gebruik de schuif om te zoomen.</p>
+      <div class="knoppen"><button class="knop licht" type="button" data-a="nee">Annuleren</button><button class="knop hoofd" type="button" data-a="ja">Gebruiken</button></div>
+    </div>`;
+    document.body.appendChild(a);
+    const vak = $('.snijvak', a), cv = $('canvas', a), ctx = cv.getContext('2d'), schuif = $('.schuif', a);
+    const W = bron.width, H = bron.height;
+    let V = 0, basis = 1, z = 1, x = 0, y = 0;
+
+    const klem = () => {
+      z = Math.min(5, Math.max(1, z));
+      const s = basis * z;
+      x = Math.min(0, Math.max(V - W * s, x));
+      y = Math.min(0, Math.max(V - H * s, y));
+    };
+    const teken = () => {
+      klem();
+      const d = devicePixelRatio || 1, s = basis * z;
+      ctx.setTransform(d, 0, 0, d, 0, 0);
+      ctx.clearRect(0, 0, V, V);
+      ctx.drawImage(bron, x, y, W * s, H * s);
+      schuif.value = z;
+    };
+    // Zoomen rond een punt in het vak, zodat dat punt op zijn plek blijft
+    const zoomNaar = (nz, px, py) => {
+      const s = basis * z, ix = (px - x) / s, iy = (py - y) / s;
+      z = Math.min(5, Math.max(1, nz));
+      const s2 = basis * z;
+      x = px - ix * s2; y = py - iy * s2;
+      teken();
+    };
+    const maatVak = () => {
+      const oudV = V, d = devicePixelRatio || 1;
+      V = vak.clientWidth;
+      cv.width = cv.height = Math.round(V * d);
+      basis = Math.max(V / W, V / H);
+      if (!oudV) {
+        if (vorige) { z = Math.min(W, H) / vorige.z; const s = basis * z; x = -vorige.x * s; y = -vorige.y * s; }
+        else { x = (V - W * basis) / 2; y = (V - H * basis) / 2; }
+      } else { x *= V / oudV; y *= V / oudV; }
+      teken();
+    };
+
+    const wijzers = new Map();
+    let knijp = null;
+    const midden = () => { const p = [...wijzers.values()]; return { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2, d: Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) }; };
+    const punt = e => { const r = vak.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    vak.addEventListener('pointerdown', e => {
+      vak.setPointerCapture(e.pointerId);
+      wijzers.set(e.pointerId, punt(e));
+      if (wijzers.size === 2) { const m = midden(); knijp = { d: m.d || 1, z, m }; }
+    });
+    vak.addEventListener('pointermove', e => {
+      if (!wijzers.has(e.pointerId)) return;
+      const oud = wijzers.get(e.pointerId), nu = punt(e);
+      wijzers.set(e.pointerId, nu);
+      if (wijzers.size === 1) { x += nu.x - oud.x; y += nu.y - oud.y; teken(); }
+      else if (wijzers.size === 2 && knijp) {
+        const m = midden();
+        x += m.x - knijp.m.x; y += m.y - knijp.m.y; knijp.m = m;
+        zoomNaar(knijp.z * m.d / knijp.d, m.x, m.y);
+      }
+    });
+    const los = e => { wijzers.delete(e.pointerId); if (wijzers.size < 2) knijp = null; };
+    vak.addEventListener('pointerup', los);
+    vak.addEventListener('pointercancel', los);
+    vak.addEventListener('wheel', e => { e.preventDefault(); const p = punt(e); zoomNaar(z * Math.exp(-e.deltaY / 400), p.x, p.y); }, { passive: false });
+    schuif.oninput = () => zoomNaar(Number(schuif.value), V / 2, V / 2);
+
+    const ro = new ResizeObserver(maatVak);
+    ro.observe(vak);
+    const sluitEsc = e => { if (e.key === "Escape") { e.stopImmediatePropagation(); stop(null); } };
+    window.addEventListener("keydown", sluitEsc, true);
+    const stop = r => { ro.disconnect(); window.removeEventListener("keydown", sluitEsc, true); a.remove(); klaar(r); };
+    a.onclick = e => {
+      const k = e.target.closest('[data-a]');
+      if (!k) return;
+      if (k.dataset.a === 'nee') return stop(null);
+      const s = basis * z;
+      stop({ x: -x / s, y: -y / s, z: V / s });
+    };
+  });
 }
 
 /* ================= Opslag: Firebase ================= */
@@ -648,8 +762,9 @@ function toonBewerk(g, opties = {}) {
   const v = openVel(`
     <div class="vel-kop"><h2>${nieuw ? 'Gerecht toevoegen' : 'Bewerken'}</h2>${sluitKnop}</div>
     <div class="veld">
-      <button class="fotokeuze" id="fk" type="button"></button>
-      <input type="file" accept="image/*" id="fi" class="verborgen">
+      <div class="fotokeuze" id="fk"></div>
+      <input type="file" accept="image/*" capture="environment" id="fiCam" class="verborgen">
+      <input type="file" accept="image/*" id="fiGal" class="verborgen">
       <div class="fotoacties" id="fa"></div>
     </div>
     <div class="veld"><label for="nm">Naam van het gerecht</label><input class="invoer" id="nm" value="${esc(f.naam)}" autocomplete="off" enterkeyhint="done"></div>
@@ -668,28 +783,44 @@ function toonBewerk(g, opties = {}) {
     </div>`);
   koppelSluit(v);
 
-  const fk = $('#fk', v), fi = $('#fi', v), fa = $('#fa', v), nm = $('#nm', v), ok = $('#ok', v);
+  const fk = $('#fk', v), fa = $('#fa', v), nm = $('#nm', v), ok = $('#ok', v);
 
+  const ICOON_CAM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
+  const ICOON_GAL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 16l5-5 4 4 2-2 5 5"/><circle cx="15.5" cy="9.5" r="1.5"/></svg>';
   const renderFoto = () => {
-    fk.innerHTML = f.thumb ? `<img src="${f.groot || f.thumb}" alt="Foto van het gerecht">` : 'Foto kiezen of maken';
-    fa.innerHTML = f.thumb ? '<button class="linkknop" type="button" id="fv">Andere foto</button><button class="linkknop" type="button" id="fw" style="margin-left:auto">Foto verwijderen</button>' : '';
-    if (f.thumb) {
-      $('#fv', v).onclick = () => fi.click();
-      $('#fw', v).onclick = () => { f.thumb = null; f.groot = null; f.fotoGewijzigd = true; renderFoto(); };
+    fk.innerHTML = f.thumb ? `<img src="${f.groot || f.thumb}" alt="Foto van het gerecht">` : '<span>Nog geen foto</span>';
+    fa.innerHTML = `<button class="knop licht" type="button" data-f="cam">${ICOON_CAM}<span>Foto maken</span></button>
+      <button class="knop licht" type="button" data-f="gal">${ICOON_GAL}<span>Galerij</span></button>` +
+      (f.thumb ? '<div class="fotolinks"><button class="linkknop" type="button" data-f="snij">Bijsnijden</button><button class="linkknop" type="button" data-f="weg">Foto verwijderen</button></div>' : '');
+  };
+  const snij = async (bron, vorige) => {
+    const uit = await snijFoto(bron, vorige);
+    if (!uit) return false;
+    const r = maakFotos(bron, uit);
+    Object.assign(f, { thumb: r.thumb, groot: r.groot, fotoGewijzigd: true, bron, uit });
+    renderFoto();
+    return true;
+  };
+  const kies = async inp => {
+    const file = inp.files?.[0];
+    inp.value = '';
+    if (!file) return;
+    try { await snij(await laadBron(file)); } catch (e) { melding(e.message); }
+  };
+  fa.onclick = async e => {
+    const b = e.target.closest('[data-f]');
+    if (!b) return;
+    const w = b.dataset.f;
+    if (w === 'cam') $('#fiCam', v).click();
+    else if (w === 'gal') $('#fiGal', v).click();
+    else if (w === 'weg') { Object.assign(f, { thumb: null, groot: null, bron: null, uit: null, fotoGewijzigd: true }); renderFoto(); }
+    else if (w === 'snij') {
+      try { await snij(f.bron || await laadBron(f.groot || f.thumb), f.bron ? f.uit : null); } catch (err) { melding(err.message); }
     }
   };
-  fk.onclick = () => fi.click();
-  fi.onchange = async () => {
-    const file = fi.files?.[0];
-    fi.value = '';
-    if (!file) return;
-    fk.textContent = 'Foto verwerken...';
-    try {
-      const r = await verwerkFoto(file);
-      f.thumb = r.thumb; f.groot = r.groot; f.fotoGewijzigd = true;
-    } catch (e) { melding(e.message); }
-    renderFoto();
-  };
+  fk.onclick = () => { if (!f.thumb) $('#fiCam', v).click(); };
+  $('#fiCam', v).onchange = e => kies(e.target);
+  $('#fiGal', v).onchange = e => kies(e.target);
   if (!nieuw && g.heeftFoto) S.store.haalFoto(g.id).then(d => { if (d && !f.fotoGewijzigd) { f.groot = d; renderFoto(); } }).catch(() => {});
 
   const renderStatus = () => {

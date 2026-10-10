@@ -1,5 +1,5 @@
 // Service worker: app werkt offline. Verhoog VERSIE na elke wijziging aan de app.
-const VERSIE = 'vreet-v10';
+const VERSIE = 'vreet-v11';
 const SCHIL = ['./', './index.html', './app.js', './firebase-config.js', './manifest.webmanifest',
   './icons/kom-192.png', './icons/kom-512.png', './icons/kom-apple.png'];
 

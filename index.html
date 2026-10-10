@@ -128,9 +128,27 @@ main{padding:8px 16px calc(var(--sb) + 110px)}
 .veld{margin-bottom:16px}
 .veld>label,.veldlabel{display:block;font-weight:600;font-size:14px;margin-bottom:6px;color:var(--zacht)}
 .invoer{width:100%;height:46px;border-radius:12px;border:1px solid var(--lijn);background:var(--vlak);padding:0 14px}
-.fotokeuze{width:100%;aspect-ratio:4/3;border-radius:18px;border:2px dashed var(--lijn);background:var(--vlak);display:grid;place-items:center;overflow:hidden;padding:0;color:var(--zacht);font-weight:600}
+.fotokeuze{width:100%;max-width:340px;margin:0 auto;aspect-ratio:1;border-radius:18px;border:2px dashed var(--lijn);background:var(--vlak);display:grid;place-items:center;overflow:hidden;color:var(--zacht);font-weight:600}
+.fotokeuze:has(img){border-style:solid}
 .fotokeuze img{width:100%;height:100%;object-fit:cover}
-.fotoacties{display:flex;gap:8px;margin-top:8px}
+.fotoacties{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.fotoacties .knop{display:flex;align-items:center;justify-content:center;gap:8px;height:46px;min-width:0}
+.fotoacties .knop svg{width:20px;height:20px;flex:none}
+.fotolinks{flex-basis:100%;display:flex;justify-content:space-between}
+
+/* Bijsnijden */
+.snij-achter{position:fixed;inset:0;z-index:30;background:#0c0a0c;display:flex;align-items:center;justify-content:center;padding:calc(var(--st) + 12px) 16px calc(var(--sb) + 12px);animation:fade .15s}
+.snij{width:100%;max-width:480px;color:#fff}
+.snij h2{font:300 24px/1.15 var(--kop);margin:0 0 14px}
+.snijvak{position:relative;width:100%;aspect-ratio:1;border-radius:18px;overflow:hidden;background:#000;touch-action:none;cursor:grab;user-select:none}
+.snijvak:active{cursor:grabbing}
+.snijvak canvas{display:block;width:100%;height:100%}
+.snijraster{position:absolute;inset:0;pointer-events:none;border:1px solid rgba(255,255,255,.55);border-radius:18px;
+  background:linear-gradient(to right,transparent calc(33.33% - .5px),rgba(255,255,255,.3) calc(33.33% - .5px) calc(33.33% + .5px),transparent calc(33.33% + .5px) calc(66.67% - .5px),rgba(255,255,255,.3) calc(66.67% - .5px) calc(66.67% + .5px),transparent calc(66.67% + .5px)),
+  linear-gradient(to bottom,transparent calc(33.33% - .5px),rgba(255,255,255,.3) calc(33.33% - .5px) calc(33.33% + .5px),transparent calc(33.33% + .5px) calc(66.67% - .5px),rgba(255,255,255,.3) calc(66.67% - .5px) calc(66.67% + .5px),transparent calc(66.67% + .5px))}
+.snij .schuif{margin-top:16px;accent-color:var(--mos)}
+.snij .uitleg{color:rgba(255,255,255,.72);margin:6px 0 0}
+.snij .knop.licht{background:rgba(255,255,255,.14);color:#fff}
 .segment{display:flex;background:var(--vlak);border-radius:12px;padding:4px;gap:4px}
 .segment button{flex:1;border:0;background:none;border-radius:9px;padding:9px;font-weight:600;color:var(--zacht)}
 .segment button[aria-pressed="true"]{background:var(--aub);color:#fff}
