@@ -9,7 +9,7 @@ const STANDAARD_GROEPEN = [
   { id: 'soort', naam: 'Soort gerecht', tags: ['Soep', 'Ovenschotel', 'Stoofpot', 'Salade', 'Wok', 'Pizza', 'Burger'] },
   { id: 'gelegenheid', naam: 'Gelegenheid', tags: ['Snel', 'Doordeweeks', 'Weekend', 'Gasten', 'Comfortfood', 'Zomers', 'Winters'] }
 ];
-const APP_VERSIE = '1.4';
+const APP_VERSIE = '1.6';
 const HH_ID = 'thuis'; // er is precies een gedeelde lijst; toegang loopt via de Firestore-regels
 
 /* ================= Lokale opslag (alleen voorkeuren van dit apparaat) ================= */
@@ -149,6 +149,21 @@ function maakFotos(bron, uit) {
   while (groot.length > 400000 && q > 0.45) { q -= 0.08; groot = naarData(gc, q); }
   return { thumb, groot };
 }
+
+// Het origineel (niet bijgesneden, max 1600 px) wordt apart bewaard, zodat je later opnieuw kunt bijsnijden.
+function maakOrigineel(bron) {
+  const k = Math.min(1, 1600 / Math.max(bron.width, bron.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bron.width * k); c.height = Math.round(bron.height * k);
+  c.getContext('2d').drawImage(bron, 0, 0, c.width, c.height);
+  let q = 0.75, d = naarData(c, q);
+  while (d.length > 700000 && q > 0.4) { q -= 0.08; d = naarData(c, q); }
+  return d;
+}
+// De uitsnede als fracties van het origineel, zodat die los staat van de resolutie
+const naarSnede = (bron, u) => ({ x: u.x / bron.width, y: u.y / bron.height, z: u.z / bron.width });
+const vanSnede = (bron, s) => (s && s.z ? { x: s.x * bron.width, y: s.y * bron.height, z: s.z * bron.width } : null);
+const middenSnede = bron => { const k = Math.min(bron.width, bron.height); return { x: (bron.width - k) / 2, y: (bron.height - k) / 2, z: k }; };
 
 // Vierkant uitsnijden: slepen, knijpen, scrollen of de schuif. Geeft { x, y, z } in bronpixels terug, of null.
 function snijFoto(bron, vorige) {
@@ -290,6 +305,7 @@ function firebaseStore({ fs, db }, code) {
   const hh = fs.doc(db, 'huishoudens', code);
   const col = fs.collection(db, 'huishoudens', code, 'gerechten');
   const foto = id => fs.doc(db, 'huishoudens', code, 'fotos', id);
+  const orig = id => fs.doc(db, 'huishoudens', code, 'originelen', id);
   return {
     async haalHuishouden() { const s = await fs.getDoc(hh); return s.exists() ? s.data() : null; },
     maakHuishouden(data) { return fs.setDoc(hh, data); },
@@ -301,10 +317,13 @@ function firebaseStore({ fs, db }, code) {
     },
     nieuwId() { return fs.doc(col).id; },
     bewaar(id, patch) { return fs.setDoc(fs.doc(col, id), patch, { merge: true }); },
-    async verwijder(id) { await Promise.all([fs.deleteDoc(fs.doc(col, id)), fs.deleteDoc(foto(id))]); },
+    async verwijder(id) { await Promise.all([fs.deleteDoc(fs.doc(col, id)), fs.deleteDoc(foto(id)), fs.deleteDoc(orig(id))]); },
     zetFoto(id, data) { return fs.setDoc(foto(id), { data }); },
     verwijderFoto(id) { return fs.deleteDoc(foto(id)); },
-    async haalFoto(id) { const s = await fs.getDoc(foto(id)); return s.exists() ? s.data().data : null; }
+    async haalFoto(id) { const s = await fs.getDoc(foto(id)); return s.exists() ? s.data().data : null; },
+    zetOrigineel(id, data) { return fs.setDoc(orig(id), { data }); },
+    verwijderOrigineel(id) { return fs.deleteDoc(orig(id)); },
+    async haalOrigineel(id) { const s = await fs.getDoc(orig(id)); return s.exists() ? s.data().data : null; }
   };
 }
 
@@ -312,6 +331,7 @@ function firebaseStore({ fs, db }, code) {
 function demoStore(code) {
   const sleutel = 'demo.' + code;
   const data = L.get(sleutel, { hh: null, gerechten: {}, fotos: {} });
+  data.originelen = data.originelen || {};
   const lh = new Set(), lg = new Set();
   const lijst = () => Object.entries(data.gerechten).map(([id, v]) => ({ id, ...v }));
   const opslaan = () => {
@@ -331,10 +351,13 @@ function demoStore(code) {
       data.gerechten[id] = { ...oud, ...p, scores: { ...(oud.scores || {}), ...(p.scores || {}) } };
       opslaan();
     },
-    async verwijder(id) { delete data.gerechten[id]; delete data.fotos[id]; opslaan(); },
+    async verwijder(id) { delete data.gerechten[id]; delete data.fotos[id]; delete data.originelen[id]; opslaan(); },
     async zetFoto(id, d) { data.fotos[id] = d; L.set(sleutel, data); },
     async verwijderFoto(id) { delete data.fotos[id]; L.set(sleutel, data); },
-    async haalFoto(id) { return data.fotos[id] || null; }
+    async haalFoto(id) { return data.fotos[id] || null; },
+    async zetOrigineel(id, d) { data.originelen[id] = d; L.set(sleutel, data); },
+    async verwijderOrigineel(id) { delete data.originelen[id]; L.set(sleutel, data); },
+    async haalOrigineel(id) { return data.originelen[id] || null; }
   };
 }
 
@@ -435,6 +458,8 @@ const ICOON_TEGELS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
 const ICOON_FILTER = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/></svg>`;
 const ICOON_LIJST = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg>`;
 
+const ICOON_CAM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
+
 function bouwHoofd() {
   app.innerHTML = `
     <header class="kop">
@@ -465,7 +490,9 @@ function bouwHoofd() {
     <main id="lijst" aria-live="polite"></main>
     <div class="onder">
       <button class="verras" id="verras">Verras ons</button>
+      <button class="snel" id="snel" aria-label="Snel toevoegen met een foto">${ICOON_CAM}</button>
       <button class="plus" id="plus" aria-label="Gerecht toevoegen">+</button>
+      <input type="file" accept="image/*" capture="environment" id="snelCam" class="verborgen">
     </div>`;
 
   $('#inst').onclick = toonInstellingen;
@@ -475,6 +502,8 @@ function bouwHoofd() {
   $('#sort').onchange = e => { S.sort = e.target.value; L.set('sort', S.sort); updateLijst(); };
   $('#weergave').onclick = () => { S.weergave = S.weergave === 'tegels' ? 'lijst' : 'tegels'; L.set('weergave', S.weergave); updateLijst(); };
   $('#verras').onclick = verras;
+  $('#snel').onclick = () => $('#snelCam').click();
+  $('#snelCam').onchange = e => { const file = e.target.files?.[0]; e.target.value = ''; if (file) snelToevoegen(file); };
   $('#plus').onclick = () => toonBewerk(null, { status: S.tab === 'wens' ? 'wens' : 'gemaakt' });
   $('#filterknop').onclick = () => { S.filterOpen = !S.filterOpen; L.set('filterOpen', S.filterOpen); updateLijst(); };
   $('#filters').onclick = e => {
@@ -587,6 +616,50 @@ function leegHtml() {
   return '<div class="leegte"><b>Nog geen gerechten</b>Tik op + en begin met wat jullie het laatst aten. Een foto en een naam is genoeg.</div>';
 }
 
+/* ================= Snel toevoegen ================= */
+// Camera, dan alleen een naam. Foto wordt automatisch vierkant uit het midden gesneden;
+// tags en cijfers vul je later aan via Aanvullen.
+async function snelToevoegen(file) {
+  let bron, uit, r;
+  try {
+    bron = await laadBron(file);
+    uit = middenSnede(bron);
+    r = maakFotos(bron, uit);
+  } catch (e) { return melding(e.message); }
+  const v = openVel(`
+    <div class="vel-kop"><h2>Snel toevoegen</h2>${sluitKnop}</div>
+    <button class="fotokeuze snelfoto" type="button" id="sf" aria-label="Foto bijsnijden"><img src="${r.groot}" alt=""></button>
+    <div class="fotolinks" style="justify-content:center"><button class="linkknop" type="button" id="ssnij">Bijsnijden</button></div>
+    <div class="veld" style="margin-top:8px"><label for="snm">Welk gerecht is dit?</label>
+      <input class="invoer" id="snm" autocomplete="off" autocapitalize="sentences" enterkeyhint="done" placeholder="Naam van het gerecht"></div>
+    <div class="knoppen"><button class="knop hoofd" id="sok" disabled>Opslaan</button></div>`);
+  koppelSluit(v);
+  const nm = $('#snm', v), ok = $('#sok', v);
+  const snij = async () => {
+    const u = await snijFoto(bron, uit);
+    if (!u) return;
+    uit = u; r = maakFotos(bron, uit);
+    $('#sf img', v).src = r.groot;
+  };
+  $('#sf', v).onclick = snij;
+  $('#ssnij', v).onclick = snij;
+  nm.oninput = () => { ok.disabled = !nm.value.trim(); };
+  const bewaar = () => {
+    const naam = nm.value.trim();
+    if (!naam) return;
+    const id = S.store.nieuwId(), nu = Date.now();
+    schrijf(S.store.bewaar(id, { naam, tags: [], status: S.tab === 'wens' ? 'wens' : 'gemaakt', scores: { p0: null, p1: null },
+      thumb: r.thumb, heeftFoto: true, heeftOrigineel: true, snede: naarSnede(bron, uit), aangemaakt: nu, gewijzigd: nu }));
+    schrijf(S.store.zetFoto(id, r.groot));
+    schrijf(S.store.zetOrigineel(id, maakOrigineel(bron)));
+    sluitVel();
+    melding('Toegevoegd. De rest vul je later aan.');
+  };
+  ok.onclick = bewaar;
+  nm.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); bewaar(); } };
+  setTimeout(() => nm.focus(), 60);
+}
+
 /* ================= Verras ons ================= */
 function verras() {
   const pool = gefilterd();
@@ -635,6 +708,7 @@ function toonDetail(g) {
   const v = openVel(`
     <div class="vel-kop"><h2>${esc(g.naam)}</h2>${sluitKnop}</div>
     <div class="detailfoto" id="df">${fotoHtml(g)}</div>
+    ${g.thumb ? '<div class="fotolinks" style="justify-content:center;margin:-6px 0 8px"><button class="linkknop" type="button" id="dsnij">Foto bijsnijden</button></div>' : ''}
     ${(g.tags || []).length ? `<div class="tagkeuze">${g.tags.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
     ${wens ? '<p class="uitleg" style="margin-top:14px">Staat op de lijst om nog te proberen.</p>' : `
     <div class="scores-rij">
@@ -647,6 +721,7 @@ function toonDetail(g) {
     </div>`);
   koppelSluit(v);
   $('#bewerk', v).onclick = () => toonBewerk(g);
+  if (g.thumb) $('#dsnij', v).onclick = () => toonBewerk(g, { snij: true });
   if (wens) $('#gemaakt', v).onclick = () => toonBewerk(g, { status: 'gemaakt' });
   if (g.heeftFoto) {
     S.store.haalFoto(g.id).then(d => { if (d && document.body.contains(v)) $('#df', v).innerHTML = `<img src="${d}" alt="">`; }).catch(() => { /* thumbnail blijft staan */ });
@@ -756,7 +831,11 @@ function toonBewerk(g, opties = {}) {
     scores: { p0: g?.scores?.p0 ?? null, p1: g?.scores?.p1 ?? null },
     thumb: g?.thumb || null,
     groot: null,
-    fotoGewijzigd: false
+    fotoGewijzigd: false,
+    bron: null, uit: null,
+    origineel: null, // nieuw origineel om op te slaan
+    heeftOrigineel: !!g?.heeftOrigineel,
+    snede: g?.snede || null
   };
 
   const v = openVel(`
@@ -785,7 +864,6 @@ function toonBewerk(g, opties = {}) {
 
   const fk = $('#fk', v), fa = $('#fa', v), nm = $('#nm', v), ok = $('#ok', v);
 
-  const ICOON_CAM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>';
   const ICOON_GAL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 16l5-5 4 4 2-2 5 5"/><circle cx="15.5" cy="9.5" r="1.5"/></svg>';
   const renderFoto = () => {
     fk.innerHTML = f.thumb ? `<img src="${f.groot || f.thumb}" alt="Foto van het gerecht">` : '<span>Nog geen foto</span>';
@@ -793,11 +871,14 @@ function toonBewerk(g, opties = {}) {
       <button class="knop licht" type="button" data-f="gal">${ICOON_GAL}<span>Galerij</span></button>` +
       (f.thumb ? '<div class="fotolinks"><button class="linkknop" type="button" data-f="snij">Bijsnijden</button><button class="linkknop" type="button" data-f="weg">Foto verwijderen</button></div>' : '');
   };
-  const snij = async (bron, vorige) => {
+  // nieuweBron: een net gekozen foto, waarvan het origineel bij opslaan wordt bewaard
+  const snij = async (bron, vorige, nieuweBron) => {
     const uit = await snijFoto(bron, vorige);
     if (!uit) return false;
     const r = maakFotos(bron, uit);
     Object.assign(f, { thumb: r.thumb, groot: r.groot, fotoGewijzigd: true, bron, uit });
+    if (nieuweBron) Object.assign(f, { origineel: maakOrigineel(bron), heeftOrigineel: true });
+    f.snede = f.heeftOrigineel ? naarSnede(bron, uit) : null;
     renderFoto();
     return true;
   };
@@ -805,7 +886,23 @@ function toonBewerk(g, opties = {}) {
     const file = inp.files?.[0];
     inp.value = '';
     if (!file) return;
-    try { await snij(await laadBron(file)); } catch (e) { melding(e.message); }
+    try { await snij(await laadBron(file), null, true); } catch (e) { melding(e.message); }
+  };
+  // Opnieuw bijsnijden: vanaf het bewaarde origineel als dat er is, anders vanaf de huidige foto
+  const herSnij = async () => {
+    try {
+      let bron = f.bron, vorige = f.uit;
+      if (!bron) {
+        const orig = !nieuw && f.heeftOrigineel ? await S.store.haalOrigineel(g.id) : null;
+        if (orig) { bron = await laadBron(orig); vorige = vanSnede(bron, f.snede); }
+        else {
+          if (!f.groot && !nieuw && g.heeftFoto) f.groot = await S.store.haalFoto(g.id);
+          bron = await laadBron(f.groot || f.thumb); vorige = null;
+          f.heeftOrigineel = false;
+        }
+      }
+      await snij(bron, vorige, false);
+    } catch (err) { melding('Foto laden mislukt: ' + (err?.message || err)); }
   };
   fa.onclick = async e => {
     const b = e.target.closest('[data-f]');
@@ -813,12 +910,10 @@ function toonBewerk(g, opties = {}) {
     const w = b.dataset.f;
     if (w === 'cam') $('#fiCam', v).click();
     else if (w === 'gal') $('#fiGal', v).click();
-    else if (w === 'weg') { Object.assign(f, { thumb: null, groot: null, bron: null, uit: null, fotoGewijzigd: true }); renderFoto(); }
-    else if (w === 'snij') {
-      try { await snij(f.bron || await laadBron(f.groot || f.thumb), f.bron ? f.uit : null); } catch (err) { melding(err.message); }
-    }
+    else if (w === 'weg') { Object.assign(f, { thumb: null, groot: null, bron: null, uit: null, origineel: null, heeftOrigineel: false, snede: null, fotoGewijzigd: true }); renderFoto(); }
+    else if (w === 'snij') herSnij();
   };
-  fk.onclick = () => { if (!f.thumb) $('#fiCam', v).click(); };
+  fk.onclick = () => { if (f.thumb) herSnij(); else $('#fiCam', v).click(); };
   $('#fiCam', v).onchange = e => kies(e.target);
   $('#fiGal', v).onchange = e => kies(e.target);
   if (!nieuw && g.heeftFoto) S.store.haalFoto(g.id).then(d => { if (d && !f.fotoGewijzigd) { f.groot = d; renderFoto(); } }).catch(() => {});
@@ -903,6 +998,7 @@ function toonBewerk(g, opties = {}) {
   nm.onkeydown = e => { if (e.key === 'Enter') nm.blur(); };
 
   renderFoto(); renderStatus(); renderTags(); renderScores(); checkOk();
+  if (opties.snij && f.thumb) herSnij();
 
   ok.onclick = () => {
     // Een cijfer dat nog in het tekstvak staat meenemen
@@ -920,17 +1016,21 @@ function toonBewerk(g, opties = {}) {
       patch.scores = { p0: f.scores.p0, p1: f.scores.p1 };
       patch.thumb = f.thumb || null;
       patch.heeftFoto = !!f.groot;
+      patch.heeftOrigineel = !!(f.groot && f.heeftOrigineel);
+      patch.snede = f.groot ? f.snede : null;
     } else {
       // Alleen gewijzigde cijfers schrijven, zodat een gelijktijdige wijziging van de ander niet wordt overschreven
       const sc2 = {};
       for (const k of ['p0', 'p1']) if (f.scores[k] !== (g.scores?.[k] ?? null)) sc2[k] = f.scores[k];
       if (Object.keys(sc2).length) patch.scores = sc2;
-      if (f.fotoGewijzigd) { patch.thumb = f.thumb || null; patch.heeftFoto = !!f.groot; }
+      if (f.fotoGewijzigd) { patch.thumb = f.thumb || null; patch.heeftFoto = !!f.groot; patch.heeftOrigineel = !!(f.groot && f.heeftOrigineel); patch.snede = f.groot ? f.snede : null; }
     }
     schrijf(S.store.bewaar(id, patch));
     if (f.fotoGewijzigd || nieuw) {
       if (f.groot) schrijf(S.store.zetFoto(id, f.groot));
       else if (!nieuw) schrijf(S.store.verwijderFoto(id));
+      if (f.groot && f.origineel) schrijf(S.store.zetOrigineel(id, f.origineel));
+      else if (!f.groot && !nieuw) schrijf(S.store.verwijderOrigineel(id));
     }
     sluitVel();
     melding(nieuw ? 'Toegevoegd' : 'Opgeslagen');
@@ -1120,8 +1220,10 @@ async function exporteer(knop) {
     const gerechten = [];
     for (const g of S.gerechten) {
       let foto = null;
+      let origineel = null;
       if (g.heeftFoto) { try { foto = await S.store.haalFoto(g.id); } catch { /* zonder foto */ } }
-      gerechten.push({ ...g, foto });
+      if (g.heeftOrigineel) { try { origineel = await S.store.haalOrigineel(g.id); } catch { /* zonder origineel */ } }
+      gerechten.push({ ...g, foto, origineel });
     }
     const data = { app: 'Vreetspiratie', versie: 1, gemaakt: new Date().toISOString(), namen: S.namen, tagGroepen: groepen(), gerechten };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
@@ -1139,11 +1241,13 @@ async function importeer(file) {
   if (!Array.isArray(data?.gerechten)) return melding('Dit is geen geldig back-upbestand');
   if (!confirm(`${data.gerechten.length} gerechten terugzetten? Gerechten met hetzelfde id worden overschreven.`)) return;
   for (const x of data.gerechten) {
-    const { id, foto, ...rest } = x;
+    const { id, foto, origineel, ...rest } = x;
+    if (!origineel) { rest.heeftOrigineel = false; rest.snede = null; }
     if (typeof rest.naam !== 'string') continue;
     const nid = id || S.store.nieuwId();
     schrijf(S.store.bewaar(nid, rest));
     if (foto) schrijf(S.store.zetFoto(nid, foto));
+    if (origineel) schrijf(S.store.zetOrigineel(nid, origineel));
   }
   if (Array.isArray(data.tagGroepen)) {
     const gs = kloon(groepen());
